@@ -5,6 +5,8 @@ const Socket = require("ws");
 const wrtcConfig = {'iceServers': [{'urls': 'stun:stun.l.google.com:19302'}]}
 const wrtcOptions = {offerToReceiveAudio: true, offerToReceiveVideo: true}
 
+let NODE_ID: string = "default";
+let NODE_AUTH: string = "testauth";
 
 // Debug messages
 class Debug{
@@ -16,41 +18,67 @@ class Debug{
     }
 }
 
+// WEB SOCKET COMMUNICATION STANDARD
+//
+// action: "<verb>"
+// data: <data>
+// id: "<id>"
+// token: "<token>"
+//
+
+
+
+
 // Handle socket request parsing
 class Request{
     public readonly parseError: boolean = false;
-    public readonly command: string;
+    public readonly action: string;
     public readonly data: any = null;
     public readonly id: string;
     public readonly token: string;
 
     constructor(msg: MessageEvent) {
-        Debug.log(msg.data, 4)
+        Debug.log(msg.data, 4);
+        let parsed;
         try{
-            let parsed = JSON.parse(msg.data);
-            this.command = parsed.command
-            this.data = parsed.data;
-            this.id = parsed.id;
-            this.token = parsed.token;
+            parsed = JSON.parse(msg.data);
         }
         catch (SyntaxError){
             this.parseError = true;
         }
+
+        this.action = parsed.action ?? "";
+        this.data = parsed.data ?? null;
+        this.id = parsed.id ?? "";
+        this.token = parsed.token ?? "";
+
     }
 }
 
 // Generate socket responses
 class Response {
-    static INVALID_REQUEST: string = JSON.stringify({command: "", error: true});
-    static AUTH_FAILED: string = JSON.stringify({message: "Invalid auth", "error": true});
-    static RENEGOTIATE_RTC: string = JSON.stringify({message: "renegotiate", renegotiate: true, error: false});
+    // static INVALID_REQUEST: string = JSON.stringify({action: "", error: true});
+    // static AUTH_FAILED: string = JSON.stringify({message: "Invalid auth", "error": true});
+    // static RENEGOTIATE_RTC: string = JSON.stringify({message: "renegotiate", renegotiate: true, error: false});
 
-    static generateAnswerResponse(answer: any){
-        return JSON.stringify({message: "SDP answer", "sdp": answer, error: false})
+    static generateGenericMessage(action: string, data: any, id: string, token: string): string{
+        return JSON.stringify({action: action, data: data, id: id, token: token});
     }
 
-    static generateIceMessage(candidate: RTCIceCandidate){
-        return JSON.stringify({message: "New ICE Candidate", candidate: candidate, error: false})
+    static generateOfferMessage(offer: any): string{
+        return Response.generateGenericMessage("offer", offer, NODE_ID, NODE_AUTH);
+    }
+
+    static generateAnswerMessage(answer: any): string{
+        return Response.generateGenericMessage("answer", answer, NODE_ID, NODE_AUTH);
+    }
+
+    static generateRenegotiateMessage(){
+        return Response.generateGenericMessage("renegotiate", null, NODE_ID, NODE_AUTH);
+    }
+
+    static generateIceMessage(candidate: RTCIceCandidate): string{
+        return Response.generateGenericMessage("addICE", candidate, NODE_ID, NODE_AUTH);
     }
 }
 
@@ -59,10 +87,11 @@ class Client {
     private id_: string|null = null;
     private socket: WebSocket;
     private peerConnection: RTCPeerConnection;
-    private clientStream: MediaStream|null;
+    private clientStream: MediaStream|null = null;
     private isAdmin: boolean = false;
+    private isInitiator: boolean = false;
 
-    constructor(socket) {
+    constructor(socket: WebSocket) {
         this.socket = socket;
         this.socket.onmessage = (msg: MessageEvent) => {this.socketMessage(msg)}
         this.peerConnection = new RTCPeerConnection(wrtcConfig);
@@ -109,7 +138,11 @@ class Client {
     }
 
     public renegotiateWebRTC(){
-        this.socket.send(Response.RENEGOTIATE_RTC);
+        if(this.isInitiator){
+            this.sendOffer();
+            return;
+        }
+        this.socket.send(Response.generateRenegotiateMessage());
     }
 
     private getAuthentication(req: Request){
@@ -139,8 +172,8 @@ class Client {
     private socketMessage(msg: MessageEvent): void {
         let req = new Request(msg);
 
-        if (req.parseError == true) {
-            this.socketSend(Response.INVALID_REQUEST);
+        if (req.parseError) {
+            // this.socketSend(Response.INVALID_REQUEST);
             // this.close();
             return;
         }
@@ -148,7 +181,7 @@ class Client {
         // Authenticate
         if (!this.getAuthentication(req)) {
             Debug.log("Auth failed", 4);
-            this.socketSend(Response.AUTH_FAILED);
+            // this.socketSend(Response.AUTH_FAILED);
             this.socket.close();
             this.peerConnection.close();
             return;
@@ -159,12 +192,18 @@ class Client {
             return;
         }
 
-        switch (req.command) {
+        switch (req.action) {
             case "offer":
                 Debug.log("Offer", 5);
-                this.processOffer(req.data);
+                this.sendAnswer(req.data);
                 break;
-            case "iceCandidate":
+            case "answer":
+                this.processAnswer(req.data);
+                break;
+            case "renegotiate":
+                this.sendOffer();
+                break;
+            case "addICE":
                 Debug.log("ICE", 5);
                 if(req.data.candidate){
                     this.peerConnection.addIceCandidate(req.data);
@@ -175,29 +214,53 @@ class Client {
     
     private adminCommands(req: Request){
         Debug.log("Admin command", 5);
-        switch (req.command){
-            case "connect": // Connect a source users stream to other users
-                Debug.log("Connecting streams", 4);
+        if(!NODE_ID){
+            return;
+        }
+        switch (req.action){
+            case "setId":
+                NODE_ID = req.data;
+                break;
+            case "addRoute": // Connect a source users stream to other users
+                Debug.log("Routing streams", 4);
+                // @ts-ignore
                 let srcStream = getClientById(req.data[0]).mediaStream;
                 for (let i = 1; i < req.data.length; i++) {
                     let user = getClientById(req.data[i]);
                     if(!user){Debug.log("No such user " + req.data[i]);}
+                    // @ts-ignore
                     user.addMediaStream(srcStream);
+                    // @ts-ignore
                     user.renegotiateWebRTC();
                 }
                 break;
-            case "disconnect":
+            case "delRoute":
                 break;
+            case "connect":
+                break;
+
                 // Todo: Add redistribution logic
         }
     }
 
-    private async processOffer(offer: any){
+    private async processAnswer(answer: any){
+        await this.peerConnection.setRemoteDescription(answer);
+    }
+
+    private async sendAnswer(offer: any){
         await this.peerConnection.setRemoteDescription(offer);
         let answer = await this.peerConnection.createAnswer(wrtcOptions);
         await this.peerConnection.setLocalDescription(answer);
 
-        this.socketSend(Response.generateAnswerResponse(answer));
+        this.socketSend(Response.generateAnswerMessage(answer));
+    }
+
+    private async sendOffer(){
+        this.isInitiator = true;
+        let offer = await this.peerConnection.createOffer(wrtcOptions);
+        await this.peerConnection.setLocalDescription(offer);
+
+        this.socketSend(Response.generateOfferMessage(offer));
     }
 
     private sendIce(candidate: RTCIceCandidate){

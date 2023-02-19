@@ -37,46 +37,43 @@
         console.log("Sending offer");
         let offer = await peerConnection.createOffer(wrtcOptions);
         await peerConnection.setLocalDescription(offer);
-        sock.send(JSON.stringify({command: "offer", data: offer, id: clientId, token: "testauth"}));
+        sock.send(JSON.stringify({action: "offer", data: offer, id: clientId, token: "testauth"}));
     }
 
     function sendICE(candidate){
         console.log("Sending ICE");
-        sock.send(JSON.stringify({command: "iceCandidate", data: candidate, id: clientId, token: "testauth"}));
+        sock.send(JSON.stringify({action: "iceCandidate", data: candidate, id: clientId, token: "testauth"}));
     }
 
     function adminConnect(ids){
-        sock.send(JSON.stringify({command: "connect", data: ids, id: clientId, token: "testauth"}));
+        sock.send(JSON.stringify({action: "connect", data: ids, id: clientId, token: "testauth"}));
     }
 
     sock.onmessage = async (ev) => {
         let res = JSON.parse(ev.data);
 
-        if(res.error === true || res.error === undefined){
-            console.log("Error on websocket reception");
-            console.log(ev.data);
-        }
+        // if(res.error === true || res.error === undefined){
+        //     console.log("Error on websocket reception");
+        //     console.log(ev.data);
+        // }
 
-        else if(res.sdp){
-            console.log("Answer received");
-            await peerConnection.setRemoteDescription(res.sdp);
+        switch(res.action){
+            case "answer":
+                console.log("Answer received");
+                await peerConnection.setRemoteDescription(res.data);
+                break;
+            case "addICE":
+                console.log("ICE received");
+                await peerConnection.addIceCandidate(res.data);
+                break;
+            case "renegotioate":
+                console.log("Renegotiating...");
+                await sendOffer();
+                break;
+            default:
+                console.log("Invalid command");
+                console.log(ev.data);
         }
-
-        else if(res.candidate){
-            console.log("ICE received");
-            await peerConnection.addIceCandidate(res.candidate);
-        }
-
-        else if(res.renegotiate){
-            console.log("Renegotiating...");
-            await sendOffer();
-        }
-
-        else{
-            console.log("Invalid command");
-            console.log(ev.data);
-        }
-
     };
 
     peerConnection.onicecandidate = ev1 => {

@@ -238,10 +238,13 @@ class Client {
             case "delRoute":
                 break;
             case "connect":
+<<<<<<< HEAD
                 let interSock = new WebSocket(req.data);
                 let interClient = new Client(interSock, true);
                 clients.push(interClient);
                 interClient.renegotiateWebRTC();
+=======
+>>>>>>> e699db1 (Added support for interconnection)
                 break;
 
                 // Todo: Add redistribution logic

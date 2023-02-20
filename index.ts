@@ -38,7 +38,7 @@ class Request{
     public readonly token: string;
 
     constructor(msg: MessageEvent) {
-        Debug.log(msg.data, 4);
+        // Debug.log(msg.data, 4);
         let parsed;
         try{
             parsed = JSON.parse(msg.data);
@@ -225,7 +225,7 @@ class Client {
             case "addRoute": // Connect a source users stream to other users
                 Debug.log("Routing streams", 4);
                 // @ts-ignore
-                let srcStream = getClientById(req.data[0]).mediaStream;
+                let srcStream = getClientById(req.data[0]).clientStream;
                 for (let i = 1; i < req.data.length; i++) {
                     let user = getClientById(req.data[i]);
                     if(!user){Debug.log("No such user " + req.data[i]);}
@@ -238,10 +238,12 @@ class Client {
             case "delRoute":
                 break;
             case "connect":
-                let interSock = new WebSocket(req.data);
+                let interSock = new Socket(req.data);
                 let interClient = new Client(interSock, true);
                 clients.push(interClient);
-                interClient.renegotiateWebRTC();
+                interSock.onopen = () => {
+                    interClient.renegotiateWebRTC();
+                }
                 break;
 
                 // Todo: Add redistribution logic

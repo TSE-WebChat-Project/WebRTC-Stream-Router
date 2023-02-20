@@ -17,12 +17,75 @@
 
 <script>
 
-    let sock = new WebSocket('ws://localhost:8080');
     const wrtcConfig = {'iceServers': [{'urls': 'stun:stun.l.google.com:19302'}]}
     let peerConnection = new RTCPeerConnection(wrtcConfig);
     const wrtcOptions = {offerToReceiveAudio: true, offerToReceiveVideo: true}
     let clientId = null;
+    let sock;
     const localVideo = document.querySelector('#local');
+
+    function setup(addr){
+        sock = new WebSocket('ws://' + addr + ':8080');
+
+        sock.onmessage = async (ev) => {
+            let res = JSON.parse(ev.data);
+
+            // if(res.error === true || res.error === undefined){
+            //     console.log("Error on websocket reception");
+            //     console.log(ev.data);
+            // }
+
+            switch(res.action){
+                case "answer":
+                    console.log("Answer received");
+                    await peerConnection.setRemoteDescription(res.data);
+                    break;
+                case "addICE":
+                    console.log("ICE received");
+                    await peerConnection.addIceCandidate(res.data);
+                    break;
+                case "renegotiate":
+                    console.log("Renegotiating...");
+                    await sendOffer();
+                    break;
+                default:
+                    console.log("Invalid command");
+                    console.log(ev.data);
+            }
+        };
+
+        peerConnection.onicecandidate = ev1 => {
+            // console.log(ev1.candidate);
+            if(ev1.candidate){
+                sendICE(ev1.candidate);
+            }
+        };
+
+        peerConnection.onconnectionstatechange = event => {
+            if (peerConnection.connectionState === 'connected') {
+                console.log("Connected!!");
+            }
+        };
+
+        peerConnection.onicegatheringstatechange = event => {
+            console.log("ICE STATE")
+            console.log(peerConnection.iceGatheringState);
+        };
+
+        peerConnection.onnegotiationneeded = event => {
+            sendOffer();
+        }
+
+        let laststreams
+        const remoteVideo = document.querySelector('#remote');
+        peerConnection.ontrack = (event) => {
+            console.log("Got track!!");
+            laststreams = event.streams;
+            const [remoteStream] = event.streams;
+            remoteVideo.srcObject = remoteStream;
+        };
+
+    }
 
     async function sendOffer(id=null){
         if(id){
@@ -45,65 +108,17 @@
         sock.send(JSON.stringify({action: "iceCandidate", data: candidate, id: clientId, token: "testauth"}));
     }
 
-    function adminConnect(ids){
-        sock.send(JSON.stringify({action: "connect", data: ids, id: clientId, token: "testauth"}));
+    function adminRoute(ids){
+        sock.send(JSON.stringify({action: "addRoute", data: ids, id: clientId, token: "testauth"}));
     }
 
-    sock.onmessage = async (ev) => {
-        let res = JSON.parse(ev.data);
-
-        // if(res.error === true || res.error === undefined){
-        //     console.log("Error on websocket reception");
-        //     console.log(ev.data);
-        // }
-
-        switch(res.action){
-            case "answer":
-                console.log("Answer received");
-                await peerConnection.setRemoteDescription(res.data);
-                break;
-            case "addICE":
-                console.log("ICE received");
-                await peerConnection.addIceCandidate(res.data);
-                break;
-            case "renegotioate":
-                console.log("Renegotiating...");
-                await sendOffer();
-                break;
-            default:
-                console.log("Invalid command");
-                console.log(ev.data);
-        }
-    };
-
-    peerConnection.onicecandidate = ev1 => {
-        // console.log(ev1.candidate);
-        if(ev1.candidate){
-            sendICE(ev1.candidate);
-        }
-    };
-
-    peerConnection.onconnectionstatechange = event => {
-        if (peerConnection.connectionState === 'connected') {
-            console.log("Connected!!");
-        }
-    };
-
-    peerConnection.onicegatheringstatechange = event => {
-        console.log("ICE STATE")
-        console.log(peerConnection.iceGatheringState);
-    };
-
-    peerConnection.onnegotiationneeded = event => {
-        sendOffer();
+    function adminConnect(url){
+        sock.send(JSON.stringify({action: "connect", data: url, id: clientId, token: "testauth"}));
     }
 
-    const remoteVideo = document.querySelector('#remote');
-    peerConnection.ontrack = (event) => {
-        console.log("Got track!!");
-        const [remoteStream] = event.streams;
-        remoteVideo.srcObject = remoteStream;
-    };
+    function adminSetId(id){
+        sock.send(JSON.stringify({action: "setId", data: id, id: clientId, token: "testauth"}));
+    }
 
 
 </script>

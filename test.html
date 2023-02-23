@@ -15,6 +15,42 @@
 <video id="local" autoplay playsinline muted></video>
 <video id="remote" autoplay playsinline muted></video>
 
+
+<div>
+    <label>Node address:</label>
+    <input type="text" id="connect">
+    <button onclick="setup(document.getElementById('connect').value)">Connect</button>
+</div>
+<div>
+    <label>Login:</label>
+    <input type="text" id="username">
+    <button onclick="sendOffer(document.getElementById('username').value)">Login</button>
+</div>
+<h3>Admin</h3>
+
+<div>
+    <button onclick="clientId = 'admin'">Admin Login</button>
+</div>
+<div>
+    <label>Node id:</label>
+    <input type="text" id="nodeid">
+    <button onclick="adminSetId(document.getElementById('nodeid').value)">Set</button>
+</div>
+
+<div>
+    <label>Node interconnect:</label>
+    <input type="text" id="interconnect">
+    <button onclick="adminConnect('ws://' + document.getElementById('interconnect').value + ':8080')">Connect</button>
+</div>
+
+<div>
+    <label>Route:</label>
+    <input type="text" id="id1">
+    <input type="text" id="id2">
+    <button onclick="adminRoute(document.getElementById('id1').value, document.getElementById('id2').value)">Route</button>
+</div>
+
+
 <script>
 
     const wrtcConfig = {'iceServers': [{'urls': 'stun:stun.l.google.com:19302'}]}
@@ -108,7 +144,8 @@
         sock.send(JSON.stringify({action: "iceCandidate", data: candidate, id: clientId, token: "testauth"}));
     }
 
-    function adminRoute(ids){
+    function adminRoute(id1, id2){
+        ids = [id1, id2];
         sock.send(JSON.stringify({action: "addRoute", data: ids, id: clientId, token: "testauth"}));
     }
 

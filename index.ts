@@ -124,12 +124,6 @@ class Response{
         }
         return JSON.stringify({action: action, data: data});
     }
-
-    // Generate message with RESP_<type>
-    static generateMessage(type: (d: any) => string, data: any = null,
-                           useAuth: boolean = false): string{
-        return type(data);
-    }
 }
 
 

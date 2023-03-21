@@ -68,7 +68,7 @@ class Debug{
  *
  * Initiator always authenticates with receiver, not the other way around
  */
-class Request{
+class SockRequest{
     /** False by default, true if an error is encountered while parsing a message */
     public readonly parseError: boolean = false;
     public readonly action: string;
@@ -77,11 +77,11 @@ class Request{
     public readonly token: string;
 
     /**
-     * Initializes a Request object from a websocket MessageEvent
+     * Initializes a SockRequest object from a websocket MessageEvent
      * @param {MessageEvent} msg - websocket message to be parsed
      */
     constructor(msg: MessageEvent) {
-        Debug.log(msg.data, 9);
+        Debug.log("Socket message: " + msg.data, 9);
         // let parsed = JSON.parse('{action: null, data: null, id: null, token: null}');
         let parsed;
         try{ // Try to parse message
@@ -100,19 +100,21 @@ class Request{
     }
 }
 
-// Generate socket responses
-class Response{
+/**
+ * Generates Socket responses
+ */
+class SockResponse{
     static RESP_OFFER = (offer: RTCSessionDescriptionInit): string =>
-    {return Response.generateGenericMessage("offer", offer, NODE_ID, NODE_AUTH, true);}
+    {return SockResponse.generateGenericMessage("offer", offer, NODE_INSTANCE_NAME, NODE_AUTH, true);}
 
     static RESP_ANSWER = (ans: RTCSessionDescriptionInit): string =>
-    {return Response.generateGenericMessage("answer", ans, NODE_ID, NODE_AUTH, false);}
+    {return SockResponse.generateGenericMessage("answer", ans, NODE_INSTANCE_NAME, NODE_AUTH, false);}
 
     static RESP_RENEG = (): string =>
-    {return Response.generateGenericMessage("renegotiate", null, NODE_ID, NODE_AUTH, false);}
+    {return SockResponse.generateGenericMessage("renegotiate", null, NODE_INSTANCE_NAME, NODE_AUTH, false);}
 
     static RESP_ICE = (ice: RTCIceCandidate, auth: boolean): string =>
-    {return Response.generateGenericMessage("addICE", ice, NODE_ID, NODE_AUTH, auth);}
+    {return SockResponse.generateGenericMessage("addICE", ice, NODE_INSTANCE_NAME, NODE_AUTH, auth);}
 
     /** Generates message in correct format. For internal use only.
      * **Do not use outside class**, add static *RESP_<type>* to class instead
@@ -183,12 +185,12 @@ abstract class ClientConnection{
     }
 
     /**
-     * Authenticates connection with id and token in Request object
-     * @param {Request} req - request to authenticate
+     * Authenticates connection with id and token in SockRequest object
+     * @param {SockRequest} req - request to authenticate
      * @protected
      * @returns boolean
      */
-    protected authenticateRequest(req: Request): boolean{
+    protected authenticateRequest(req: SockRequest): boolean{
         if(this._id == null){ // Assign id to connection on first auth
             this._id = req.id;
         }
@@ -255,7 +257,7 @@ abstract class ClientConnection{
 class InboundClient extends ClientConnection{
     /** @inheritDoc */
     protected onClientMessage(msg: MessageEvent): void {
-        let req = new Request(msg);
+        let req = new SockRequest(msg);
         if (req.parseError) {
             Debug.log("Could not parse message from client", 4);
             return;
@@ -271,7 +273,7 @@ class InboundClient extends ClientConnection{
             case "offer":
                 Debug.log(`Got offer from '${this.id}'`, 5);
                 this.getRtcAnswer(req.data).then((answer) =>{
-                    this.send(Response.RESP_ANSWER(answer));
+                    this.send(SockResponse.RESP_ANSWER(answer));
                 });
                 break;
             case "addICE":
@@ -287,7 +289,7 @@ class InboundClient extends ClientConnection{
 
     /** @inheritDoc */
     public renegotiateWebRTC(): void {
-        this.send(Response.RESP_RENEG());
+        this.send(SockResponse.RESP_RENEG());
     }
 
     /**
@@ -305,14 +307,14 @@ class InboundClient extends ClientConnection{
 
     /** @inheritDoc */
     protected sendIce(candidate: RTCIceCandidate): void {
-        this.send(Response.RESP_ICE(candidate, false));
+        this.send(SockResponse.RESP_ICE(candidate, false));
     }
 }
 
 class OutboundClient extends ClientConnection{
     /** @inheritDoc */
     onClientMessage(msg: MessageEvent): void {
-        let req = new Request(msg);
+        let req = new SockRequest(msg);
         if (req.parseError) {
             Debug.log("Could not parse message from client", 4);
             return;
@@ -352,7 +354,7 @@ class OutboundClient extends ClientConnection{
     private async sendOffer(){
         let offer = await this.peerConnection.createOffer(wrtcOptions);
         await this.peerConnection.setLocalDescription(offer);
-        this.send(Response.RESP_OFFER(offer));
+        this.send(SockResponse.RESP_OFFER(offer));
     }
 
     /** @inheritDoc */
@@ -362,7 +364,7 @@ class OutboundClient extends ClientConnection{
 
     /** @inheritDoc */
     protected sendIce(candidate: RTCIceCandidate): void {
-        this.send(Response.RESP_ICE(candidate, true));
+        this.send(SockResponse.RESP_ICE(candidate, true));
     }
 
 }
@@ -382,7 +384,7 @@ class Management{
     }
 
     protected onManagementMessage(msg: MessageEvent): void{
-        let req = new Request(msg);
+        let req = new SockRequest(msg);
         if (req.parseError) {
             Debug.log("Could not parse message from management server", 1);
             return;

@@ -1,4 +1,7 @@
 import {WebSocketServer} from "ws";
+import {cert, initializeApp} from "firebase-admin/app";
+import {getFirestore} from "firebase-admin/firestore";
+import axios from 'axios';
 
 const { RTCPeerConnection } = require('wrtc');
 const Socket = require("ws");
@@ -8,14 +11,43 @@ const wrtcConfig = {'iceServers': [{'urls': 'stun:stun.l.google.com:19302'}]};
 /** WebRTC connection options. Allows adding video and audio streams after init */
 const wrtcOptions = {offerToReceiveAudio: true, offerToReceiveVideo: true};
 
-/** Node id TODO: set node id with environment variable */
-let NODE_ID: string = "default";
-/** Node auth token TODO: set node auth token with environment variable */
-let NODE_AUTH: string = "testauth";
-/** Node management socket address TODO: set management socket address with environment variable */
-let NODE_MANAGEMENT_SOCKET = 'ws://localhost:8765';
-/** Global debugging level TODO: set debug level with environment variable */
-let DEBUG_LEVEL: number = 10;
+/** Node id */
+let NODE_ID: string;
+/** Node instance name */
+let NODE_INSTANCE_NAME: string;
+/** Node instance group name */
+let NODE_INSTANCE_GROUP_NAME: string;
+/** Node socket address */
+let NODE_SOCKET_ADDRESS: string;
+/** Node socket port */
+let NODE_SOCKET_PORT: string;
+/** Node auth token */
+let NODE_AUTH: string;
+
+/** Global debugging level */
+let DEBUG_LEVEL: number;
+
+async function setGlobals() {
+    if (process.env.ENVIRONMENT == "development"){
+        NODE_INSTANCE_NAME = process.env.NODE_DEV_INSTANCE_NAME ?? "default-dev-id";
+        NODE_SOCKET_ADDRESS = process.env.NODE_DEV_SOCKET_ADDRESS ?? "ws://localhost:8080";
+        NODE_SOCKET_PORT = process.env.NODE_DEV_SOCKET_PORT ?? "8080"
+        NODE_INSTANCE_GROUP_NAME = process.env.NODE_DEV_INSTANCE_GROUP_NAME ?? "project/devgroup"
+    }
+    else if (process.env.ENVIRONMENT == "production"){
+        let headers = {headers:{'Metadata-Flavor': 'Google'}}
+        NODE_INSTANCE_NAME = await axios.get("http://metadata.google.internal/computeMetadata/v1/instance/name", headers);
+        NODE_SOCKET_ADDRESS = await axios.get("http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip", headers)
+        NODE_INSTANCE_GROUP_NAME = await axios.get("http://metadata.google.internal/computeMetadata/v1/instance/attributes/created-by", headers);
+    }
+    NODE_AUTH= '';
+
+    if (process.env.DEBUG_LEVEL) {
+        if (!isNaN(parseInt(process.env.DEBUG_LEVEL))) {
+            DEBUG_LEVEL = parseInt(process.env.DEBUG_LEVEL);
+        }
+    }
+}
 
 class Debug{
     static debugLevel: number = 4;
@@ -391,8 +423,9 @@ class Management{
         }
 
         switch (req.action) {
-            case "setId": // TODO: Remove this
+            case "setId":
                 NODE_ID = req.data;
+                Debug.log(`Node id set by management server. ID: ${NODE_ID}`);
                 break;
             case "addRoute": // Connect a source users stream to other users
                 Debug.log("Routing streams", 4);
@@ -447,14 +480,67 @@ class Management{
         this.clients.push(client);
     }
 }
-const managementSocket: WebSocket = new Socket(NODE_MANAGEMENT_SOCKET);
-const manager = new Management(managementSocket);
 
-const server: WebSocketServer = new Socket.Server({port: 8081});
+Debug.log("Start", 1)
 
-server.on('connection', (socket: WebSocket) => {
-    Debug.log("Got connection", 3);
-    let client = new InboundClient(socket);
-    manager.addClient(client);
-    // TODO: Handle disconnect
-});
+// Initialise firestore
+if(process.env.ENVIRONMENT == "development"){ // Use service key in development environment
+    if(!process.env.SERVICE_KEY){
+        throw new Error("Environment set to development but no service key set!")
+    }
+    const serviceAccount = require(process.env.SERVICE_KEY);
+    initializeApp({
+        credential: cert(serviceAccount)
+    });
+}
+else if(process.env.ENVIRONMENT == "production"){
+    initializeApp();
+}
+
+const db = getFirestore();
+
+
+async function init(){
+    await setGlobals(); // Init global vars
+
+    let data = {
+        instance_name: NODE_INSTANCE_NAME,
+        instance_group_name: NODE_INSTANCE_GROUP_NAME,
+        management_socket: null,
+        socket_address: NODE_SOCKET_ADDRESS,
+        socket_port: NODE_SOCKET_PORT
+    };
+    let docRef = db.collection('new-instances').doc("instance-name-test")
+    await docRef.set(data);
+
+    let db_read = false; // Used to stop event firing multiple times
+    let unsub = docRef.onSnapshot(async (snapshot: any) => { // Wait for management server to add connection info
+        Debug.log("Got firebase snapshot", 9);
+        if(db_read){return;}
+
+        data = await snapshot.data()
+        if (data.management_socket){
+            db_read = true;
+            Debug.log(`Got management socket from firestore: ${data.management_socket}`, 2);
+
+            // Start server
+            const managementSocket: WebSocket = new Socket(data.management_socket);
+            const manager = new Management(managementSocket);
+
+            const server: WebSocketServer = new Socket.Server({port: 8081});
+
+            server.on('connection', (socket: WebSocket) => {
+                Debug.log("Got connection", 3);
+                let client = new InboundClient(socket);
+                manager.addClient(client);
+                // TODO: Handle disconnect
+            });
+
+            await docRef.delete();
+            unsub(); // Remove event listener
+            Debug.log("Connection document deleted", 2);
+        }
+    });
+}
+
+init().then(() => {Debug.log("Setup complete")});

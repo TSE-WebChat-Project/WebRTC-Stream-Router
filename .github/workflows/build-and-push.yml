@@ -1,0 +1,37 @@
+name: Build and push Docker image to Google Artifact registry
+on:
+  push:
+    branches: [ "main" ]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    name: Build and Push to GC
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: webrtc-stream-router
+      PROJECT_ID: resonant-rock-376300
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - uses: google-github-actions/setup-gcloud@v1
+        with:
+          service_account_key: ${{ secrets.SERVICE_ACCOUNT_KEY }}
+          project_id: ${{ env.PROJECT_ID }}
+          export_default_credentials: true
+
+      - name: Build Docker Image
+        run: docker build -t $IMAGE_NAME:latest .
+
+      - name: Configure Docker Client
+        run: |-
+          gcloud auth configure-docker --quiet
+          gcloud auth configure-docker europe-west2-docker.pkg.dev --quiet
+
+      - name: Push Docker Image to Artifact Registry
+        run: |-
+          docker tag $IMAGE_NAME:latest europe-west2-docker.pkg.dev/$PROJECT_ID/images/$IMAGE_NAME:latest
+          docker push europe-west2-docker.pkg.dev/$PROJECT_ID/images/$IMAGE_NAME:latest

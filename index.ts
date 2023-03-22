@@ -36,9 +36,9 @@ async function setGlobals() {
     }
     else if (process.env.ENVIRONMENT == "production"){
         let headers = {headers:{'Metadata-Flavor': 'Google'}}
-        NODE_INSTANCE_NAME = await axios.get("http://metadata.google.internal/computeMetadata/v1/instance/name", headers);
-        NODE_SOCKET_ADDRESS = await axios.get("http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip", headers)
-        NODE_INSTANCE_GROUP_NAME = await axios.get("http://metadata.google.internal/computeMetadata/v1/instance/attributes/created-by", headers);
+        NODE_INSTANCE_NAME = (await axios.get("http://metadata.google.internal/computeMetadata/v1/instance/name", headers)).data;
+        NODE_SOCKET_ADDRESS = (await axios.get("http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip", headers)).data;
+        NODE_INSTANCE_GROUP_NAME = (await axios.get("http://metadata.google.internal/computeMetadata/v1/instance/attributes/created-by", headers)).data;
     }
     NODE_AUTH= '';
 

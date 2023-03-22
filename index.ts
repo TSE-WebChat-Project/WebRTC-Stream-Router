@@ -28,10 +28,10 @@ let NODE_AUTH: string;
 let DEBUG_LEVEL: number;
 
 async function setGlobals() {
+    NODE_SOCKET_PORT = process.env.SOCKET_PORT ?? "8080"
     if (process.env.ENVIRONMENT == "development"){
         NODE_INSTANCE_NAME = process.env.NODE_DEV_INSTANCE_NAME ?? "default-dev-id";
         NODE_SOCKET_ADDRESS = process.env.NODE_DEV_SOCKET_ADDRESS ?? "ws://localhost:8080";
-        NODE_SOCKET_PORT = process.env.NODE_DEV_SOCKET_PORT ?? "8080"
         NODE_INSTANCE_GROUP_NAME = process.env.NODE_DEV_INSTANCE_GROUP_NAME ?? "project/devgroup"
     }
     else if (process.env.ENVIRONMENT == "production"){
@@ -527,7 +527,7 @@ async function init(){
             const managementSocket: WebSocket = new Socket(data.management_socket);
             const manager = new Management(managementSocket);
 
-            const server: WebSocketServer = new Socket.Server({port: 8081});
+            const server: WebSocketServer = new Socket.Server({port: NODE_SOCKET_PORT});
 
             server.on('connection', (socket: WebSocket) => {
                 Debug.log("Got connection", 3);

@@ -27,8 +27,11 @@ jobs:
         with:
           project_id: ${{ env.PROJECT_ID }}
 
+      - name: Load environment variables
+        run: mv env.dist env
+
       - name: Build Docker Image
-        run: docker build -t $IMAGE_NAME:latest .
+        run: docker build -t $IMAGE_NAME:latest $(for i in `cat env`; do out+="--build-arg $i " ; done; echo $out;out="") .
 
       - name: Configure Docker Client
         run: |-

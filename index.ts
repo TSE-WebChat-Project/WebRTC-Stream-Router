@@ -188,7 +188,7 @@ abstract class ClientConnection{
         this.peerConnection = new RTCPeerConnection(wrtcConfig);
 
         // Add connection state logging to peer connection
-        this.peerConnection.onconnectionstatechange = () => {
+        this.peerConnection.onconnectionstatechange = (ev) => {
             switch (this.peerConnection.connectionState) {
                 case "connected":
                     Debug.log("WebRTC connection established", 4);
@@ -510,7 +510,7 @@ async function init(){
         socket_address: NODE_SOCKET_ADDRESS,
         socket_port: NODE_SOCKET_PORT
     };
-    let docRef = db.collection('new-instances').doc("instance-name-test")
+    let docRef = db.collection('new-instances').doc(NODE_INSTANCE_NAME)
     await docRef.set(data);
 
     let db_read = false; // Used to stop event firing multiple times

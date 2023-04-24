@@ -1,10 +1,8 @@
-import {WebSocketServer} from "ws";
 import {cert, initializeApp} from "firebase-admin/app";
 import {getFirestore} from "firebase-admin/firestore";
 import axios from 'axios';
 
 const { RTCPeerConnection } = require('wrtc');
-const Socket = require("ws");
 
 /** WebRTC connection config */
 const wrtcConfig = {'iceServers': [{'urls': 'stun:stun.l.google.com:19302'}]};
@@ -17,30 +15,19 @@ let NODE_ID: string;
 let NODE_INSTANCE_NAME: string;
 /** Node instance group name */
 let NODE_INSTANCE_GROUP_NAME: string;
-/** Node socket address */
-let NODE_SOCKET_ADDRESS: string;
-/** Node socket port */
-let NODE_SOCKET_PORT: string;
-/** Node auth token */
-let NODE_AUTH: string;
 
 /** Global debugging level */
 let DEBUG_LEVEL: number;
-
 async function setGlobals() {
-    NODE_SOCKET_PORT = process.env.SOCKET_PORT ?? "8080"
     if (process.env.ENVIRONMENT == "development"){
         NODE_INSTANCE_NAME = process.env.NODE_DEV_INSTANCE_NAME ?? "default-dev-id";
-        NODE_SOCKET_ADDRESS = process.env.NODE_DEV_SOCKET_ADDRESS ?? "ws://localhost:8080";
         NODE_INSTANCE_GROUP_NAME = process.env.NODE_DEV_INSTANCE_GROUP_NAME ?? "project/devgroup"
     }
     else if (process.env.ENVIRONMENT == "production"){
         let headers = {headers:{'Metadata-Flavor': 'Google'}}
         NODE_INSTANCE_NAME = (await axios.get("http://metadata.google.internal/computeMetadata/v1/instance/name", headers)).data;
-        NODE_SOCKET_ADDRESS = (await axios.get("http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip", headers)).data;
         NODE_INSTANCE_GROUP_NAME = (await axios.get("http://metadata.google.internal/computeMetadata/v1/instance/attributes/created-by", headers)).data;
     }
-    NODE_AUTH= '';
 
     if (process.env.DEBUG_LEVEL) {
         if (!isNaN(parseInt(process.env.DEBUG_LEVEL))) {
@@ -48,6 +35,22 @@ async function setGlobals() {
         }
     }
 }
+
+/** Initialise firestore */
+if(process.env.ENVIRONMENT == "development"){ // Use service key in development environment
+    if(!process.env.SERVICE_KEY){
+        throw new Error("Environment set to development but no service key set!")
+    }
+    const serviceAccount = require(process.env.SERVICE_KEY);
+    initializeApp({
+        credential: cert(serviceAccount)
+    });
+}
+else if(process.env.ENVIRONMENT == "production"){
+    initializeApp();
+}
+
+const db = getFirestore();
 
 class Debug{
     static debugLevel: number = 4;
@@ -66,7 +69,7 @@ class Debug{
      * - 6 - WebRTC track
      * - 7 - WebRTC ICE
      * - 8 - Unused
-     * - 9 - Socket messages (JSON)
+     * - 9 - Signaling messages (JSON)
      * - 10+ - Everything
      * @param msg - the message to be logged
      * @param level - the debugging level at which the message will be shown
@@ -79,111 +82,111 @@ class Debug{
     }
 }
 
+/** Creates and manages ClientConnection instances */
+class ClientManager{
+    protected clients: ClientConnection[];
 
-/**
- * Parses websocket requests
- *
- *
- * ### Websocket communication standard
- * Initiator:
- * ```
- * {action: "<verb>",
- * data: <data>,
- * id: "<id>",
- * token: "<token>"}
- * ```
- * Receiver:
- * ```
- * {action: "<verb>",
- * data: "<data>"}
- * ```
- *
- * Initiator always authenticates with receiver, not the other way around
- */
-class SockRequest{
-    /** False by default, true if an error is encountered while parsing a message */
-    public readonly parseError: boolean = false;
-    public readonly action: string;
-    public readonly data: any = null;
-    public readonly id: string;
-    public readonly token: string;
+    constructor() {
+        this.clients = [];
+    }
 
     /**
-     * Initializes a SockRequest object from a websocket MessageEvent
-     * @param {MessageEvent} msg - websocket message to be parsed
+     * Gets client with id if exists
+     * @param id
      */
-    constructor(msg: MessageEvent) {
-        Debug.log("Socket message: " + msg.data, 9);
-        // let parsed = JSON.parse('{action: null, data: null, id: null, token: null}');
-        let parsed;
-        try{ // Try to parse message
-            parsed = JSON.parse(msg.data);
+    getClientById(id: string): ClientConnection | null{
+        for(const client of this.clients){
+            if(client.id == id){
+                return client;
+            }
         }
-        catch (SyntaxError){
-            this.parseError = true;
-            Debug.log("Could not parse message");
-        }
+        return null;
+    }
 
-        // Set props to value or default
-        this.action = parsed.action ?? "";
-        this.data = parsed.data ?? null;
-        this.id = parsed.id ?? "";
-        this.token = parsed.token ?? "";
+    /**
+     * Adds client to list and initializes connection
+     * @param id
+     * @param initiator - Router sends offer first if true
+     */
+    addClient(id: string, initiator: boolean){
+        let client = new ClientConnection(id, initiator);
+        if(initiator){
+            client.sendOffer();
+        }
+        this.clients.push(client);
+    }
+
+    /**
+     * Removes client and closes connection, return true if successful
+     * @param id
+     */
+    removeClient(id: string): boolean{
+        let client = this.getClientById(id);
+        if(client){
+            client.close();
+            return true;
+        }
+        return false;
+
+    }
+}
+// Singleton
+const Clients = new ClientManager()
+
+/**
+ * Manages inter-client connections
+ */
+class ConnectionManager{
+    static connectClients(srcClientId: string, destClientIds: string[]){
+        Debug.log("Routing streams", 4);
+        let srcClient = Clients.getClientById(srcClientId);
+        if(!srcClient){
+            Debug.log(`Routing error: Source client with id ${srcClientId} does not exist`, 1);
+            return;
+        }
+        let srcStream = srcClient.clientStreams[0];
+        for (let i = 1; i < destClientIds.length; i++) {
+            let destClient = Clients.getClientById(destClientIds[i]);
+            if (!destClient) {
+                Debug.log(`Routing error: Destination client with id ${destClientIds[i]} does not exist`, 1);
+                continue;
+            }
+            destClient.addMediaStream(srcStream);
+            destClient.renegotiateWebRTC();
+        }
     }
 }
 
 /**
- * Generates Socket responses
+ * Handles client WebRTC connections
  */
-class SockResponse{
-    static RESP_OFFER = (offer: RTCSessionDescriptionInit): string =>
-    {return SockResponse.generateGenericMessage("offer", offer, NODE_INSTANCE_NAME, NODE_AUTH, true);}
-
-    static RESP_ANSWER = (ans: RTCSessionDescriptionInit): string =>
-    {return SockResponse.generateGenericMessage("answer", ans, NODE_INSTANCE_NAME, NODE_AUTH, false);}
-
-    static RESP_RENEG = (): string =>
-    {return SockResponse.generateGenericMessage("renegotiate", null, NODE_INSTANCE_NAME, NODE_AUTH, false);}
-
-    static RESP_ICE = (ice: RTCIceCandidate, auth: boolean): string =>
-    {return SockResponse.generateGenericMessage("addICE", ice, NODE_INSTANCE_NAME, NODE_AUTH, auth);}
-
-    /** Generates message in correct format. For internal use only.
-     * **Do not use outside class**, add static *RESP_<type>* to class instead
-     */
-    static generateGenericMessage(action: string, data: any, id: string,
-                                  token: string, useAuth:boolean = false): string{
-        if(useAuth){
-            return JSON.stringify({action: action, data: data, id: id, token: token});
-        }
-        return JSON.stringify({action: action, data: data});
-    }
-}
-
-
-/**
- * Manages connections for WebRTC clients
- */
-abstract class ClientConnection{
-    private _id: string | null = null;
-    private socket: WebSocket;
+class ClientConnection{
+    public readonly id: string;
+    public readonly isInitiator: boolean
     protected peerConnection: RTCPeerConnection;
     /** Stores a list of MediaStreams on the clients peer connection */
-    clientStreams: MediaStream[] = [];
+    public clientStreams: MediaStream[] = [];
 
-    get id(): string{
-        return this._id ?? "";
-    }
+    /** Database references */
+    protected offerRef: FirebaseFirestore.CollectionReference;
+    protected answerRef: FirebaseFirestore.CollectionReference;
+    protected iceRef: FirebaseFirestore.CollectionReference;
+    protected commandRef: FirebaseFirestore.CollectionReference;
 
     /**
-     * Initialize client connection from websocket
-     * @param {WebSocket} socket - client WebSocket connection
+     * Initialize client connection
+     * @param {string} id - client ID
+     * @param {boolean} initiator - true if client initiates connection (used for renegotiation)
      */
-    constructor(socket: WebSocket) {
-        this.socket = socket;
-        this.socket.onmessage = (msg: MessageEvent) => {
-            this.onClientMessage(msg);
-        }
+    constructor(id: string, initiator: boolean) {
+        this.id = id;
+        this.isInitiator = initiator
+
+        this.offerRef = db.collection(`meetings/${NODE_INSTANCE_GROUP_NAME}/clients/${this.id}/receivedOffers`);
+        this.answerRef = db.collection(`meetings/${NODE_INSTANCE_GROUP_NAME}/clients/${this.id}/receivedAnswers`);
+        this.iceRef = db.collection(`meetings/${NODE_INSTANCE_GROUP_NAME}/clients/${this.id}/receivedIce`);
+        this.commandRef = db.collection(`meetings/${NODE_INSTANCE_GROUP_NAME}/clients/${this.id}/commands`);
+
         // Initialize peer connection for client
         this.peerConnection = new RTCPeerConnection(wrtcConfig);
 
@@ -217,32 +220,72 @@ abstract class ClientConnection{
     }
 
     /**
-     * Authenticates connection with id and token in SockRequest object
-     * @param {SockRequest} req - request to authenticate
-     * @protected
-     * @returns boolean
+     * Handle ICE from client
+     * @param {RTCIceCandidate} candidate
      */
-    protected authenticateRequest(req: SockRequest): boolean{
-        if(this._id == null){ // Assign id to connection on first auth
-            this._id = req.id;
-        }
-        else if (this._id != req.id){ // Check if id changed since first auth
-            return false;
-        }
-        if(req.token == "testauth"){ // ToDo: implement authentication (firebase)
-            Debug.log("Authenticated user" + this._id, 4);
-            return true;
-        }
-        return false;
+    public handleIce(candidate: RTCIceCandidate){
+        Debug.log(`Got ICE from '${this.id}'`, 5);
+        this.peerConnection.addIceCandidate(candidate);
     }
 
     /**
-     * Send data to client over the websocket connection
+     * Handle WebRTC answer from client
+     * @param {RTCSessionDescriptionInit} answer
+     */
+    public handleAnswer(answer: RTCSessionDescriptionInit){
+        Debug.log(`Got answer from '${this.id}'`, 5);
+        this.peerConnection.setRemoteDescription(answer);
+    }
+
+    /**
+     * Handle WebRTC offer from client
+     * @param {RTCSessionDescriptionInit} offer
+     */
+    public handleOffer(offer: RTCSessionDescriptionInit){
+        Debug.log(`Got offer from '${this.id}'`, 5);
+        this.getRtcAnswer(offer).then((answer) =>{
+            let answerDoc = {
+                id: NODE_ID,
+                answer: answer
+            };
+            this.send(this.answerRef, answerDoc);
+        });
+    }
+
+    /**
+     * Send data to client over Firebase
+     * @param {FirebaseFirestore.CollectionReference} dbRef - Database reference
      * @param {string} data - data to send over client socket
      * @protected
      */
-    protected send(data: string): void{
-        this.socket.send(data);
+    protected async send(dbRef: FirebaseFirestore.CollectionReference, data: object): Promise<void>{
+        await dbRef.doc().set(data);
+    }
+
+    /**
+     * Sends ICE candidates to client
+     * @param candidate - ICE candidate
+     * @public
+     */
+    public sendIce(candidate: RTCIceCandidate): void {
+        let iceData = {
+            src_id: NODE_ID,
+            candidate: JSON.stringify(candidate)
+        };
+        this.send(this.iceRef, iceData);
+    }
+
+    /**
+     * Sends offer to client
+     */
+    public async sendOffer(){
+        let offer = await this.peerConnection.createOffer(wrtcOptions);
+        await this.peerConnection.setLocalDescription(offer);
+        let offerData = {
+            id: NODE_ID,
+            offer: offer
+        };
+        this.send(this.offerRef, offerData);
     }
 
     /**
@@ -250,29 +293,18 @@ abstract class ClientConnection{
      */
     public close(): void{
         this.peerConnection.close();
-        this.socket.close();
     }
 
     /**
      * Renegotiates WebRTC connection with client
-     * @protected
      */
-    abstract renegotiateWebRTC(): void;
-
-    /**
-     * Sends ICE candidates over websocket to client
-     * @param candidate - ICE candidate
-     * @protected
-     */
-    protected abstract sendIce(candidate: RTCIceCandidate): void
-
-
-    /**
-     * Callback for Websocket message event
-     * @param {MessageEvent} msg - message
-     * @protected
-     */
-    protected abstract onClientMessage(msg: MessageEvent): void;
+    public renegotiateWebRTC(){
+        if(this.isInitiator){
+            this.sendOffer();
+            return;
+        }
+        this.send(this.commandRef, {id: NODE_ID, command: "renegotiate"});
+    }
 
     /**
      * Adds MediaStream object to client
@@ -284,48 +316,9 @@ abstract class ClientConnection{
             this.peerConnection.addTrack(track, stream);
         });
     }
-}
-
-class InboundClient extends ClientConnection{
-    /** @inheritDoc */
-    protected onClientMessage(msg: MessageEvent): void {
-        let req = new SockRequest(msg);
-        if (req.parseError) {
-            Debug.log("Could not parse message from client", 4);
-            return;
-        }
-
-        if (!this.authenticateRequest(req)) {
-            Debug.log("Auth failed", 4);
-            this.close();
-            return;
-        }
-
-        switch (req.action) {
-            case "offer":
-                Debug.log(`Got offer from '${this.id}'`, 5);
-                this.getRtcAnswer(req.data).then((answer) =>{
-                    this.send(SockResponse.RESP_ANSWER(answer));
-                });
-                break;
-            case "addICE":
-                Debug.log(`Got ICE from '${this.id}'`, 5);
-                if(req.data.candidate){
-                    this.peerConnection.addIceCandidate(req.data);
-                }
-                break;
-            default:
-                Debug.log(`Unknown command '${req.action}' from client ${this.id}`, 5);
-        }
-    }
-
-    /** @inheritDoc */
-    public renegotiateWebRTC(): void {
-        this.send(SockResponse.RESP_RENEG());
-    }
 
     /**
-     * Generate answer for WebRTC offer
+     * Generates WebRTC answer from client offer
      * @param offer
      * @private
      */
@@ -336,169 +329,122 @@ class InboundClient extends ClientConnection{
 
         return answer;
     }
-
-    /** @inheritDoc */
-    protected sendIce(candidate: RTCIceCandidate): void {
-        this.send(SockResponse.RESP_ICE(candidate, false));
-    }
-}
-
-class OutboundClient extends ClientConnection{
-    /** @inheritDoc */
-    onClientMessage(msg: MessageEvent): void {
-        let req = new SockRequest(msg);
-        if (req.parseError) {
-            Debug.log("Could not parse message from client", 4);
-            return;
-        }
-
-        switch (req.action) {
-            case "answer":
-                this.processAnswer(req.data);
-                break;
-            case "renegotiate":
-                this.renegotiateWebRTC();
-                break;
-            case "addICE":
-                Debug.log(`Got ICE from '${this.id}'`, 5);
-                if(req.data.candidate){
-                    this.peerConnection.addIceCandidate(req.data);
-                }
-                break;
-            default:
-                Debug.log(`Unknown command '${req.action}' from client ${this.id}`, 5);
-        }
-    }
-
-    /**
-     * Handle received WebRTC answer response
-     * @param answer
-     * @private
-     */
-    private async processAnswer(answer: any){
-        await this.peerConnection.setRemoteDescription(answer);
-    }
-
-    /**
-     * Sends WebRTC offer to client
-     * @private
-     */
-    private async sendOffer(){
-        let offer = await this.peerConnection.createOffer(wrtcOptions);
-        await this.peerConnection.setLocalDescription(offer);
-        this.send(SockResponse.RESP_OFFER(offer));
-    }
-
-    /** @inheritDoc */
-    renegotiateWebRTC(): void {
-        this.sendOffer();
-    }
-
-    /** @inheritDoc */
-    protected sendIce(candidate: RTCIceCandidate): void {
-        this.send(SockResponse.RESP_ICE(candidate, true));
-    }
-
 }
 
 /**
- * Handles management websocket interface
+ * Manages Firebase signaling
  */
-class Management{
-    private socket: WebSocket;
-    protected clients: ClientConnection[]; // List of all connected clients
-    constructor(socket: WebSocket) {
-        this.socket = socket;
-        this.socket.onmessage = (event: MessageEvent) => {
-            this.onManagementMessage(event);
-        }
-        this.clients = [];
+class SignalManager{
+    protected offerDbRef: FirebaseFirestore.CollectionReference;
+    protected answerDbRef: FirebaseFirestore.CollectionReference;
+    protected iceDbRef: FirebaseFirestore.CollectionReference;
+    protected commandDbRef: FirebaseFirestore.CollectionReference;
+
+    protected unsubList: (() => void)[];
+    constructor() {
+        this.unsubList = [];
+
+        let addUnsub = (unsub: ()=>void) => this.unsubList.push(unsub);
+
+        this.offerDbRef = db.collection(`meetings/${NODE_INSTANCE_GROUP_NAME}/clients/${NODE_ID}/receivedOffers`);
+        this.answerDbRef = db.collection(`meetings/${NODE_INSTANCE_GROUP_NAME}/clients/${NODE_ID}/receivedAnswers`);
+        this.iceDbRef = db.collection(`meetings/${NODE_INSTANCE_GROUP_NAME}/clients/${NODE_ID}/receivedIce`);
+        this.commandDbRef = db.collection(`meetings/${NODE_INSTANCE_GROUP_NAME}/clients/${NODE_ID}/commands`);
+
+        addUnsub(this.offerDbRef.onSnapshot(this.handleOffer));
+        addUnsub(this.answerDbRef.onSnapshot(this.handleAnswer));
+        addUnsub(this.iceDbRef.onSnapshot(this.handleICE));
+        addUnsub(this.commandDbRef.onSnapshot(this.handleCommand));
     }
 
-    protected onManagementMessage(msg: MessageEvent): void{
-        let req = new SockRequest(msg);
-        if (req.parseError) {
-            Debug.log("Could not parse message from management server", 1);
-            return;
-        }
+    async handleOffer(snapshot: FirebaseFirestore.QuerySnapshot<FirebaseFirestore.DocumentData>){
+        snapshot.docChanges().forEach(change => {
+            if(change.type == "added"){
+                let client = Clients.getClientById(change.doc.data().id);
+                if(!client){
+                    Debug.log(`Got offer from client id ${change.doc.data().id} which was not initialized`, 1);
+                    return;
+                }
+                if(change.doc.data().offer){
+                    client.handleOffer(change.doc.data().offer);
+                    return;
+                }
+                Debug.log(`Got null offer from client id ${change.doc.data().id}`, 1);
 
-        switch (req.action) {
-            case "setId":
-                NODE_ID = req.data;
-                Debug.log(`Node id set by management server. ID: ${NODE_ID}`);
-                break;
-            case "addRoute": // Connect a source users stream to other users
-                Debug.log("Routing streams", 4);
-                let client = this.getClientById(req.data[0]);
-                if (!client){
-                    Debug.log(`Routing error: Source client with id ${req.data[0]} does not exist`, 1);
-                    break;
-                }
-                let srcStream = client.clientStreams[0];
-                for (let i = 1; i < req.data.length; i++) {
-                    let user = this.getClientById(req.data[i]);
-                    if (!user) {
-                        Debug.log(`Routing error: Destination client with id ${req.data[i]} does not exist`, 1);
-                        continue;
-                    }
-                    user.addMediaStream(srcStream);
-                    user.renegotiateWebRTC();
-                }
-                break;
-            case "connect": // Connect to another node
-                let interSock = new Socket(req.data);
-                let interClient = new OutboundClient(interSock);
-                this.clients.push(interClient);
-                interSock.onopen = () => {
-                    interClient.renegotiateWebRTC();
-                }
-                break;
-        }
-    }
-
-    /**
-     * Gets client with by id
-     * @param id
-     * @returns ClientConnection or null if client not found
-     */
-    public getClientById(id: string): ClientConnection|null {
-        let result: ClientConnection | null = null;
-        this.clients.forEach((client) => {
-            if (client.id === id) {
-                result = client;
             }
         });
-
-        return result;
     }
 
-    /**
-     * Adds a client connection to the manager
-     * @param client
-     */
-    public addClient(client: ClientConnection): void{
-        this.clients.push(client);
+    async handleAnswer(snapshot: FirebaseFirestore.QuerySnapshot<FirebaseFirestore.DocumentData>){
+        snapshot.docChanges().forEach(change => {
+            if(change.type == "added"){
+                let client = Clients.getClientById(change.doc.data().id);
+                if(!client){
+                    Debug.log(`Got answer from client id ${change.doc.data().id} which was not initialized`, 1);
+                    return;
+                }
+                if(change.doc.data().answer){
+                    client.handleAnswer(change.doc.data().offer);
+                }
+                Debug.log(`Got null answer from client id ${change.doc.data().id}`, 1);
+
+            }
+        });
+    }
+
+    async handleICE(snapshot: FirebaseFirestore.QuerySnapshot<FirebaseFirestore.DocumentData>){
+        snapshot.docChanges().forEach(change => {
+            if(change.type == "added"){
+                let client = Clients.getClientById(change.doc.data().id);
+                if(!client){
+                    Debug.log(`Got ICE from client id ${change.doc.data().id} which was not initialized`, 1);
+                    return;
+                }
+                if(change.doc.data().ice){
+                    client.handleIce(change.doc.data().offer);
+                }
+                Debug.log(`Got null ICE from client id ${change.doc.data().id}`, 1);
+            }
+        });
+    }
+
+    async handleCommand(snapshot: FirebaseFirestore.QuerySnapshot<FirebaseFirestore.DocumentData>){
+        snapshot.docChanges().forEach(change => {
+            Debug.log("Got command snapshot", 9);
+            if(change.type == "added"){
+                let docData = change.doc.data()
+                if(docData.command){
+                    switch (docData.command){
+                        case "registerClient":
+                            Debug.log(`Register client id: ${docData.client_id}`, 4)
+                            Clients.addClient(docData.client_id, false);
+                            break;
+                        case "addRoute":
+                            ConnectionManager.connectClients(docData.src_client, docData.dest_clients);
+                            break;
+                        case "renegotiate":
+                            let client = Clients.getClientById(change.doc.data().id);
+                            if(!client){
+                                Debug.log(`Got renegotiation for client id ${change.doc.data().id} which was not initialized`, 1);
+                                break;
+                            }
+                            client.renegotiateWebRTC();
+                            break;
+                        default:
+                            Debug.log("Got invalid command", 1);
+                            Debug.log(JSON.stringify(change.doc.data()), 3)
+                    }
+                }
+            }
+        });
     }
 }
 
-Debug.log("Start", 1)
-
-// Initialise firestore
-if(process.env.ENVIRONMENT == "development"){ // Use service key in development environment
-    if(!process.env.SERVICE_KEY){
-        throw new Error("Environment set to development but no service key set!")
-    }
-    const serviceAccount = require(process.env.SERVICE_KEY);
-    initializeApp({
-        credential: cert(serviceAccount)
-    });
+async function startRouter(){
+    Debug.log("Starting...")
+    NODE_ID = NODE_INSTANCE_NAME;
+    let sigManager = new SignalManager()
 }
-else if(process.env.ENVIRONMENT == "production"){
-    initializeApp();
-}
-
-const db = getFirestore();
-
 
 async function init(){
     await setGlobals(); // Init global vars
@@ -506,41 +452,22 @@ async function init(){
     let data = {
         instance_name: NODE_INSTANCE_NAME,
         instance_group_name: NODE_INSTANCE_GROUP_NAME,
-        management_socket: null,
-        socket_address: NODE_SOCKET_ADDRESS,
-        socket_port: NODE_SOCKET_PORT
+        registered: false,
     };
-    let docRef = db.collection('new-instances').doc(NODE_INSTANCE_NAME)
-    await docRef.set(data);
+    let newInstanceDbRef = db.collection('new-instances').where("instance_name", "==", NODE_INSTANCE_NAME)
+    let docRef = db.collection('new-instances').doc(NODE_INSTANCE_NAME);
 
-    let db_read = false; // Used to stop event firing multiple times
-    let unsub = docRef.onSnapshot(async (snapshot: any) => { // Wait for management server to add connection info
-        Debug.log("Got firebase snapshot", 9);
-        if(db_read){return;}
-
-        data = await snapshot.data()
-        if (data.management_socket){
-            db_read = true;
-            Debug.log(`Got management socket from firestore: ${data.management_socket}`, 2);
-
-            // Start server
-            const managementSocket: WebSocket = new Socket(data.management_socket);
-            const manager = new Management(managementSocket);
-
-            const server: WebSocketServer = new Socket.Server({port: NODE_SOCKET_PORT});
-
-            server.on('connection', (socket: WebSocket) => {
-                Debug.log("Got connection", 3);
-                let client = new InboundClient(socket);
-                manager.addClient(client);
-                // TODO: Handle disconnect
-            });
-
-            await docRef.delete();
-            unsub(); // Remove event listener
-            Debug.log("Connection document deleted", 2);
+    let unsub = newInstanceDbRef.onSnapshot(async (querySnapshot) => { // Wait for management server to add connection inf
+        await docRef.set(data);
+        for (const change of querySnapshot.docChanges()) {
+            Debug.log("Got firebase snapshot", 9);
+            if(change.type == "modified" && await change.doc.data().registered){
+                unsub();
+                await docRef.delete();
+                await startRouter();
+            }
         }
     });
 }
 
-init().then(() => {Debug.log("Setup complete")});
+init();
